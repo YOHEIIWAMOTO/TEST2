@@ -1,20 +1,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { v4 as uuidv4 } from 'uuid';
+
+export interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
 
 export interface SessionEntry {
   id: string;
   title: string;
   createdAt: string;
   updatedAt: string;
-  messages: Array<{
-    role: 'user' | 'assistant';
-    content: string;
-    timestamp: string;
-  }>;
+  messages: Message[];
 }
 
-export interface SessionHistory {
+interface SessionHistory {
   version: number;
   sessions: SessionEntry[];
 }
@@ -22,164 +25,136 @@ export interface SessionHistory {
 const HISTORY_VERSION = 1;
 const HISTORY_FILE_NAME = 'session-history.json';
 
-/**
- * デスクトップ版のセッション履歴を管理するクラス。
- * 修正: セッション終了時に履歴が保存されない問題を修正。
- *   - 非同期書き込みを同期書き込みに変更してアプリ終了時のデータロストを防止
- *   - ディレクトリが存在しない場合の自動作成を追加
- *   - 書き込みエラー時のリトライ処理を追加
- */
 export class SessionHistoryManager {
   private historyFilePath: string;
   private history: SessionHistory;
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly SAVE_DEBOUNCE_MS = 500;
+  private pendingSave = false;
 
-  constructor(appDataDir?: string) {
-    const dataDir = appDataDir ?? this.getDefaultDataDir();
-    this.historyFilePath = path.join(dataDir, HISTORY_FILE_NAME);
-    this.history = this.load();
+  constructor(dataDir?: string) {
+    const dir = dataDir ?? SessionHistoryManager.defaultDataDir();
+    this.historyFilePath = path.join(dir, HISTORY_FILE_NAME);
+    this.history = this.loadFromDisk();
 
-    // アプリ終了時に確実に保存する (修正箇所)
+    // --- 修正: プロセス終了時に同期書き込みで確実に保存 ---
     process.on('exit', () => this.flushSync());
-    process.on('SIGINT', () => {
-      this.flushSync();
-      process.exit(0);
-    });
-    process.on('SIGTERM', () => {
-      this.flushSync();
-      process.exit(0);
-    });
+    process.on('SIGINT', () => { this.flushSync(); process.exit(0); });
+    process.on('SIGTERM', () => { this.flushSync(); process.exit(0); });
   }
 
-  private getDefaultDataDir(): string {
-    const platform = process.platform;
-    if (platform === 'win32') {
-      return path.join(process.env['APPDATA'] ?? os.homedir(), 'Claude', 'sessions');
-    } else if (platform === 'darwin') {
-      return path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'sessions');
-    } else {
-      return path.join(os.homedir(), '.config', 'claude', 'sessions');
+  static defaultDataDir(): string {
+    switch (process.platform) {
+      case 'win32':
+        return path.join(process.env['APPDATA'] ?? os.homedir(), 'DesktopApp', 'sessions');
+      case 'darwin':
+        return path.join(os.homedir(), 'Library', 'Application Support', 'DesktopApp', 'sessions');
+      default:
+        return path.join(os.homedir(), '.config', 'desktop-app', 'sessions');
     }
   }
 
-  private ensureDirectoryExists(): void {
-    const dir = path.dirname(this.historyFilePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-  }
+  // ---- 読み込み ----
 
-  load(): SessionHistory {
+  private loadFromDisk(): SessionHistory {
     try {
       if (fs.existsSync(this.historyFilePath)) {
         const raw = fs.readFileSync(this.historyFilePath, 'utf-8');
         const parsed = JSON.parse(raw) as SessionHistory;
-
-        // バージョン確認・マイグレーション
-        if (parsed.version !== HISTORY_VERSION) {
-          return this.migrate(parsed);
+        if (typeof parsed.version === 'number' && Array.isArray(parsed.sessions)) {
+          return parsed;
         }
-        return parsed;
       }
-    } catch (err) {
-      console.error('[SessionHistoryManager] Failed to load session history:', err);
+    } catch {
+      // 破損ファイルは無視して空で初期化
     }
-
     return { version: HISTORY_VERSION, sessions: [] };
   }
 
-  private migrate(old: Partial<SessionHistory>): SessionHistory {
-    // 将来のバージョンアップに対応するためのマイグレーション
-    return {
-      version: HISTORY_VERSION,
-      sessions: old.sessions ?? [],
-    };
+  // ---- 取得 ----
+
+  getSessions(): SessionEntry[] {
+    return [...this.history.sessions];
   }
 
-  /**
-   * セッションを追加または更新する
-   */
-  upsertSession(entry: SessionEntry): void {
-    const index = this.history.sessions.findIndex((s) => s.id === entry.id);
+  getSession(id: string): SessionEntry | undefined {
+    return this.history.sessions.find((s) => s.id === id);
+  }
+
+  // ---- 更新 ----
+
+  createSession(title?: string): SessionEntry {
     const now = new Date().toISOString();
+    const entry: SessionEntry = {
+      id: uuidv4(),
+      title: title ?? `Session ${this.history.sessions.length + 1}`,
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+    };
+    this.history.sessions.unshift(entry);
+    this.scheduleSave();
+    return entry;
+  }
 
-    if (index >= 0) {
-      this.history.sessions[index] = { ...entry, updatedAt: now };
-    } else {
-      this.history.sessions.unshift({ ...entry, createdAt: now, updatedAt: now });
-    }
+  addMessage(sessionId: string, role: Message['role'], content: string): void {
+    const session = this.history.sessions.find((s) => s.id === sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
 
-    // デバウンスして頻繁な書き込みを防ぐ (修正箇所)
+    session.messages.push({ role, content, timestamp: new Date().toISOString() });
+    session.updatedAt = new Date().toISOString();
     this.scheduleSave();
   }
 
-  /**
-   * セッションを削除する
-   */
   deleteSession(sessionId: string): void {
     this.history.sessions = this.history.sessions.filter((s) => s.id !== sessionId);
     this.scheduleSave();
   }
 
-  /**
-   * 全セッション一覧を取得する
-   */
-  getSessions(): SessionEntry[] {
-    return [...this.history.sessions];
-  }
+  // ---- 書き込み ----
 
-  /**
-   * 特定のセッションを取得する
-   */
-  getSession(sessionId: string): SessionEntry | undefined {
-    return this.history.sessions.find((s) => s.id === sessionId);
+  private ensureDir(): void {
+    const dir = path.dirname(this.historyFilePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   }
 
   private scheduleSave(): void {
-    if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
-    }
-    this.saveTimer = setTimeout(() => {
+    if (this.pendingSave) return;
+    this.pendingSave = true;
+    // 非同期で書き込む（通常時はこちらを使用）
+    setImmediate(() => {
+      this.pendingSave = false;
       this.flush();
-    }, this.SAVE_DEBOUNCE_MS);
-  }
-
-  /**
-   * 非同期で履歴ファイルに書き込む
-   */
-  flush(): void {
-    this.ensureDirectoryExists();
-    const json = JSON.stringify(this.history, null, 2);
-    const tmpPath = this.historyFilePath + '.tmp';
-
-    // アトミックな書き込み (tmp -> rename) でファイル破損を防ぐ (修正箇所)
-    fs.writeFile(tmpPath, json, 'utf-8', (err) => {
-      if (err) {
-        console.error('[SessionHistoryManager] Failed to write tmp file:', err);
-        return;
-      }
-      fs.rename(tmpPath, this.historyFilePath, (renameErr) => {
-        if (renameErr) {
-          console.error('[SessionHistoryManager] Failed to rename tmp file:', renameErr);
-        }
-      });
     });
   }
 
+  /** 非同期書き込み（通常時）*/
+  flush(): void {
+    try {
+      this.ensureDir();
+      const tmp = this.historyFilePath + '.tmp';
+      fs.writeFile(tmp, JSON.stringify(this.history, null, 2), 'utf-8', (err) => {
+        if (err) { console.error('[History] write error:', err); return; }
+        fs.rename(tmp, this.historyFilePath, (e) => {
+          if (e) console.error('[History] rename error:', e);
+        });
+      });
+    } catch (err) {
+      console.error('[History] flush error:', err);
+    }
+  }
+
   /**
-   * アプリ終了時に同期で確実に書き込む (修正の核心)
-   * 以前は非同期のみだったため、プロセス終了時にデータが失われていた。
+   * 同期書き込み — プロセス終了時に呼び出す。
+   * これがないと非同期コールバックが完了する前にプロセスが終了し
+   * セッション履歴が失われる（バグの根本原因）。
    */
   flushSync(): void {
     try {
-      this.ensureDirectoryExists();
-      const json = JSON.stringify(this.history, null, 2);
-      const tmpPath = this.historyFilePath + '.tmp';
-      fs.writeFileSync(tmpPath, json, 'utf-8');
-      fs.renameSync(tmpPath, this.historyFilePath);
+      this.ensureDir();
+      const tmp = this.historyFilePath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(this.history, null, 2), 'utf-8');
+      fs.renameSync(tmp, this.historyFilePath);
     } catch (err) {
-      console.error('[SessionHistoryManager] Failed to flush session history synchronously:', err);
+      console.error('[History] flushSync error:', err);
     }
   }
 }
