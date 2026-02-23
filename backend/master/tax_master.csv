@@ -1,0 +1,5 @@
+tax_class_code,tax_class_name,tax_rate,description
+tax_10,課税仕入 10%,10,Standard tax rate 10%
+tax_8,課税仕入 8%（軽）,8,Reduced tax rate 8% (food etc.)
+tax_exempt,非課税仕入,0,Non-taxable
+tax_free,対象外,0,Out of scope

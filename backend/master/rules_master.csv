@@ -1,0 +1,7 @@
+keyword,debit_account,credit_account,debit_tax_class,description_template
+タクシー,旅費交通費,未払金,課税仕入 10%,交通費 {vendor_name}
+電車,旅費交通費,未払金,課税仕入 10%,交通費 {vendor_name}
+コンビニ,消耗品費,未払金,課税仕入 10%,消耗品 {vendor_name}
+飲食,会議費,未払金,課税仕入 10%,会議費 {vendor_name}
+文房具,消耗品費,未払金,課税仕入 10%,消耗品 {vendor_name}
+default,雑費,未払金,課税仕入 10%,経費 {vendor_name}
