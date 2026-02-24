@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -14,7 +16,44 @@ from app.services.ocr_provider import ocr_provider
 from app.services.extract_provider import extract_provider
 from app.services.journal_builder import build_journal_entry
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/receipts", tags=["receipts"])
+
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp"}
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
+
+
+def _validate_upload_file(file: UploadFile) -> str:
+    """Validate uploaded file and return its extension."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    ext = ""
+    if "." in file.filename:
+        ext = "." + file.filename.rsplit(".", 1)[-1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {ext}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+
+    # Check content type
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail=f"Invalid content type: {file.content_type}")
+
+    # Check file size (read and check)
+    content = file.file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large: {len(content)} bytes (max {MAX_FILE_SIZE} bytes)",
+        )
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+    file.file.seek(0)
+
+    return ext
 
 
 @router.post("/upload", response_model=list[ReceiptSummary])
@@ -22,12 +61,15 @@ async def upload_receipts(
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 files per upload")
+
     results = []
     for file in files:
+        ext = _validate_upload_file(file)
         receipt_id = str(ULID())
-        ext = ""
-        if file.filename:
-            ext = "." + file.filename.rsplit(".", 1)[-1] if "." in file.filename else ""
 
         storage.save_receipt_image(receipt_id, ext, file.file)
         file.file.seek(0)
@@ -41,11 +83,17 @@ async def upload_receipts(
         db.add(receipt)
         db.flush()
 
+        # OCR processing
         image_path = storage.get_receipt_image_path(receipt_id, ext)
-        ocr_text = ocr_provider.extract_text(image_path)
+        try:
+            ocr_text = ocr_provider.extract_text(image_path)
+        except Exception as e:
+            logger.error("OCR failed for receipt %s: %s", receipt_id, e)
+            ocr_text = ""
         receipt.ocr_text = ocr_text
         receipt.status = ReceiptStatus.ocr_done
 
+        # Data extraction
         extracted = extract_provider.extract(ocr_text)
         receipt.vendor_name = extracted.vendor_name
         receipt.transaction_date = extracted.transaction_date
@@ -54,6 +102,7 @@ async def upload_receipts(
         receipt.description = extracted.description
         receipt.status = ReceiptStatus.extracted
 
+        # Build journal entry
         journal_entry = build_journal_entry(
             receipt_id=receipt_id,
             vendor_name=extracted.vendor_name,
@@ -80,6 +129,13 @@ def list_receipts(
 ):
     query = db.query(Receipt).order_by(Receipt.uploaded_at.desc())
     if status:
+        # Validate status value
+        valid_statuses = {s.value for s in ReceiptStatus}
+        if status not in valid_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status: {status}. Valid values: {', '.join(sorted(valid_statuses))}",
+            )
         query = query.filter(Receipt.status == status)
     return query.all()
 
@@ -98,10 +154,15 @@ def get_receipt_image(receipt_id: str, db: Session = Depends(get_db)):
     if not receipt:
         raise HTTPException(status_code=404, detail="Receipt not found")
     image_path = storage.get_receipt_image_path(receipt_id, receipt.file_extension)
-    return FileResponse(
-        image_path,
-        media_type=f"image/{receipt.file_extension.lstrip('.')}",
-    )
+    ext = receipt.file_extension.lstrip(".")
+    media_types = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png", "gif": "image/gif",
+        "bmp": "image/bmp", "tiff": "image/tiff", "tif": "image/tiff",
+        "webp": "image/webp",
+    }
+    media_type = media_types.get(ext, f"image/{ext}")
+    return FileResponse(image_path, media_type=media_type)
 
 
 @router.patch("/{receipt_id}", response_model=ReceiptDetail)
@@ -117,10 +178,24 @@ def update_receipt(
         raise HTTPException(status_code=400, detail="Cannot edit approved receipt")
 
     update_data = body.model_dump(exclude_unset=True, exclude={"journal_entries"})
+
+    # Validate numeric fields
+    if "total_amount" in update_data and update_data["total_amount"] is not None:
+        if update_data["total_amount"] < 0:
+            raise HTTPException(status_code=400, detail="Total amount cannot be negative")
+    if "tax_amount" in update_data and update_data["tax_amount"] is not None:
+        if update_data["tax_amount"] < 0:
+            raise HTTPException(status_code=400, detail="Tax amount cannot be negative")
+
     for key, value in update_data.items():
         setattr(receipt, key, value)
 
     if body.journal_entries is not None:
+        # Validate journal entries
+        for je_data in body.journal_entries:
+            if je_data.debit_amount < 0 or je_data.credit_amount < 0:
+                raise HTTPException(status_code=400, detail="Journal amounts cannot be negative")
+
         db.query(JournalEntry).filter(
             JournalEntry.receipt_id == receipt_id
         ).delete()
@@ -143,6 +218,11 @@ def approve_receipt(receipt_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Receipt not found")
     if receipt.status == ReceiptStatus.approved:
         raise HTTPException(status_code=400, detail="Already approved")
+    if receipt.status not in (ReceiptStatus.needs_review, ReceiptStatus.rejected):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot approve receipt in '{receipt.status}' status",
+        )
     if not receipt.journal_entries:
         raise HTTPException(status_code=400, detail="No journal entries to approve")
 
@@ -159,6 +239,11 @@ def reject_receipt(receipt_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Receipt not found")
     if receipt.status == ReceiptStatus.approved:
         raise HTTPException(status_code=400, detail="Cannot reject approved receipt")
+    if receipt.status not in (ReceiptStatus.needs_review, ReceiptStatus.extracted):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reject receipt in '{receipt.status}' status",
+        )
 
     receipt.status = ReceiptStatus.rejected
     db.commit()
@@ -168,6 +253,9 @@ def reject_receipt(receipt_id: str, db: Session = Depends(get_db)):
 
 @router.post("/approve-bulk", response_model=BulkApproveResponse)
 def approve_bulk(body: BulkApproveRequest, db: Session = Depends(get_db)):
+    if not body.receipt_ids:
+        raise HTTPException(status_code=400, detail="No receipt IDs provided")
+
     approved = []
     errors = []
     for rid in body.receipt_ids:
@@ -177,6 +265,9 @@ def approve_bulk(body: BulkApproveRequest, db: Session = Depends(get_db)):
             continue
         if receipt.status == ReceiptStatus.approved:
             errors.append(f"{rid}: already approved")
+            continue
+        if receipt.status not in (ReceiptStatus.needs_review, ReceiptStatus.rejected):
+            errors.append(f"{rid}: cannot approve from '{receipt.status}' status")
             continue
         if not receipt.journal_entries:
             errors.append(f"{rid}: no journal entries")

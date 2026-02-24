@@ -12,6 +12,7 @@ export default function ReceiptDetailPage() {
   const navigate = useNavigate()
   const [receipt, setReceipt] = useState<ReceiptDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
   const [savingFields, setSavingFields] = useState(false)
 
   // Editable field state
@@ -20,6 +21,9 @@ export default function ReceiptDetailPage() {
   const [totalAmount, setTotalAmount] = useState('')
   const [taxAmount, setTaxAmount] = useState('')
   const [desc, setDesc] = useState('')
+
+  // Field validation
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (id) {
@@ -34,8 +38,35 @@ export default function ReceiptDetailPage() {
     }
   }, [id])
 
+  const showMessage = (msg: string, type: 'success' | 'error') => {
+    if (type === 'success') {
+      setSuccess(msg)
+      setError(null)
+      setTimeout(() => setSuccess(null), 3000)
+    } else {
+      setError(msg)
+      setSuccess(null)
+    }
+  }
+
+  const validateFields = (): boolean => {
+    const errors: Record<string, string> = {}
+    if (totalAmount && parseInt(totalAmount, 10) < 0) {
+      errors.totalAmount = 'Cannot be negative'
+    }
+    if (taxAmount && parseInt(taxAmount, 10) < 0) {
+      errors.taxAmount = 'Cannot be negative'
+    }
+    if (taxAmount && totalAmount && parseInt(taxAmount, 10) > parseInt(totalAmount, 10)) {
+      errors.taxAmount = 'Tax cannot exceed total amount'
+    }
+    setFieldErrors(errors)
+    return Object.keys(errors).length === 0
+  }
+
   const handleSaveFields = async () => {
     if (!id) return
+    if (!validateFields()) return
     setSavingFields(true)
     try {
       const updated = await updateReceipt(id, {
@@ -46,8 +77,9 @@ export default function ReceiptDetailPage() {
         description: desc || null,
       })
       setReceipt(updated)
+      showMessage('Receipt data saved', 'success')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Save failed')
+      showMessage(e instanceof Error ? e.message : 'Save failed', 'error')
     } finally {
       setSavingFields(false)
     }
@@ -55,8 +87,13 @@ export default function ReceiptDetailPage() {
 
   const handleSaveJournal = async (entries: JournalEntry[]) => {
     if (!id) return
-    const updated = await updateReceipt(id, { journal_entries: entries })
-    setReceipt(updated)
+    try {
+      const updated = await updateReceipt(id, { journal_entries: entries })
+      setReceipt(updated)
+      showMessage('Journal entry saved', 'success')
+    } catch (e: unknown) {
+      showMessage(e instanceof Error ? e.message : 'Save failed', 'error')
+    }
   }
 
   const handleApprove = async () => {
@@ -64,8 +101,9 @@ export default function ReceiptDetailPage() {
     try {
       const updated = await approveReceipt(id)
       setReceipt(updated)
+      showMessage('Receipt approved', 'success')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Approve failed')
+      showMessage(e instanceof Error ? e.message : 'Approve failed', 'error')
     }
   }
 
@@ -74,13 +112,14 @@ export default function ReceiptDetailPage() {
     try {
       const updated = await rejectReceipt(id)
       setReceipt(updated)
+      showMessage('Receipt rejected', 'success')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Reject failed')
+      showMessage(e instanceof Error ? e.message : 'Reject failed', 'error')
     }
   }
 
-  if (error) return <div className="text-red-600 p-4">{error}</div>
-  if (!receipt) return <div className="text-gray-500 p-4">Loading...</div>
+  if (!receipt && !error) return <div className="text-gray-500 p-4">Loading...</div>
+  if (!receipt) return <div className="text-red-600 p-4">{error}</div>
 
   const isApproved = receipt.status === 'approved'
   const isRejected = receipt.status === 'rejected'
@@ -88,6 +127,19 @@ export default function ReceiptDetailPage() {
 
   return (
     <div className="space-y-4">
+      {/* Notification banners */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm flex justify-between items-center">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700 text-xs ml-2">Dismiss</button>
+        </div>
+      )}
+      {success && (
+        <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-green-700 text-sm">
+          {success}
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
@@ -154,23 +206,39 @@ export default function ReceiptDetailPage() {
               </div>
               <div className="flex items-center gap-2">
                 <label className="text-sm text-gray-500 w-24 shrink-0">Amount</label>
-                <input
-                  type="number"
-                  value={totalAmount}
-                  onChange={e => setTotalAmount(e.target.value)}
-                  disabled={isLocked}
-                  className="flex-1 px-3 py-1.5 border rounded text-sm disabled:bg-gray-100"
-                />
+                <div className="flex-1">
+                  <input
+                    type="number"
+                    value={totalAmount}
+                    onChange={e => { setTotalAmount(e.target.value); setFieldErrors(prev => ({ ...prev, totalAmount: '' })) }}
+                    disabled={isLocked}
+                    min="0"
+                    className={`w-full px-3 py-1.5 border rounded text-sm disabled:bg-gray-100 ${
+                      fieldErrors.totalAmount ? 'border-red-400 bg-red-50' : ''
+                    }`}
+                  />
+                  {fieldErrors.totalAmount && (
+                    <p className="text-xs text-red-500 mt-0.5">{fieldErrors.totalAmount}</p>
+                  )}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <label className="text-sm text-gray-500 w-24 shrink-0">Tax</label>
-                <input
-                  type="number"
-                  value={taxAmount}
-                  onChange={e => setTaxAmount(e.target.value)}
-                  disabled={isLocked}
-                  className="flex-1 px-3 py-1.5 border rounded text-sm disabled:bg-gray-100"
-                />
+                <div className="flex-1">
+                  <input
+                    type="number"
+                    value={taxAmount}
+                    onChange={e => { setTaxAmount(e.target.value); setFieldErrors(prev => ({ ...prev, taxAmount: '' })) }}
+                    disabled={isLocked}
+                    min="0"
+                    className={`w-full px-3 py-1.5 border rounded text-sm disabled:bg-gray-100 ${
+                      fieldErrors.taxAmount ? 'border-red-400 bg-red-50' : ''
+                    }`}
+                  />
+                  {fieldErrors.taxAmount && (
+                    <p className="text-xs text-red-500 mt-0.5">{fieldErrors.taxAmount}</p>
+                  )}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <label className="text-sm text-gray-500 w-24 shrink-0">Description</label>

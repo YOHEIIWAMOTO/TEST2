@@ -1,11 +1,38 @@
+import logging
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class OCRProvider(Protocol):
     def extract_text(self, image_path: str) -> str: ...
 
 
+class TesseractOCRProvider:
+    """OCR provider using Tesseract via pytesseract."""
+
+    def __init__(self, lang: str = "jpn"):
+        self.lang = lang
+
+    def extract_text(self, image_path: str) -> str:
+        try:
+            import pytesseract
+            from PIL import Image
+
+            image = Image.open(image_path)
+            # Convert to RGB if necessary (handles RGBA, palette mode, etc.)
+            if image.mode not in ("L", "RGB"):
+                image = image.convert("RGB")
+            text = pytesseract.image_to_string(image, lang=self.lang)
+            return text.strip()
+        except Exception as e:
+            logger.error("Tesseract OCR failed for %s: %s", image_path, e)
+            raise RuntimeError(f"OCR processing failed: {e}") from e
+
+
 class DummyOCRProvider:
+    """Fallback provider that returns fixed sample text (for testing without Tesseract)."""
+
     def extract_text(self, image_path: str) -> str:
         return (
             "サンプル株式会社\n"
@@ -17,4 +44,20 @@ class DummyOCRProvider:
         )
 
 
-ocr_provider: OCRProvider = DummyOCRProvider()
+def _create_provider() -> OCRProvider:
+    from app.config import settings
+
+    if settings.ocr_provider == "dummy":
+        logger.info("Using DummyOCRProvider")
+        return DummyOCRProvider()
+    try:
+        import pytesseract  # noqa: F401
+
+        logger.info("Using TesseractOCRProvider")
+        return TesseractOCRProvider()
+    except ImportError:
+        logger.warning("pytesseract not installed, falling back to DummyOCRProvider")
+        return DummyOCRProvider()
+
+
+ocr_provider: OCRProvider = _create_provider()
