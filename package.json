@@ -1,0 +1,14 @@
+{
+  "name": "test2-plugin-system",
+  "version": "1.0.0",
+  "description": "Plugin marketplace system with CLI management",
+  "main": "src/index.js",
+  "bin": {
+    "plugin": "./src/cli.js"
+  },
+  "scripts": {
+    "plugin": "node src/cli.js"
+  },
+  "keywords": ["plugin", "marketplace"],
+  "license": "MIT"
+}
