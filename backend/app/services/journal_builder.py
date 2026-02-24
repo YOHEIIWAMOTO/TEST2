@@ -1,6 +1,9 @@
 import csv
+import logging
 from pathlib import Path
 from app.models import JournalEntry
+
+logger = logging.getLogger(__name__)
 
 MASTER_DIR = Path(__file__).resolve().parent.parent.parent / "master"
 
@@ -27,6 +30,26 @@ def _match_rule(vendor_name: str | None, description: str | None, rules: list[di
     return default_rule or rules[-1]
 
 
+def _match_with_learned_rules(vendor_name: str | None, description: str | None) -> dict | None:
+    """Check learned rules first (vendor exact match, then keyword match)."""
+    try:
+        from app.services.learned_rules import lookup_vendor_rule, lookup_keyword_rule
+
+        rule = lookup_vendor_rule(vendor_name)
+        if rule:
+            logger.info("Using learned vendor rule for '%s'", vendor_name)
+            return rule
+
+        rule = lookup_keyword_rule(vendor_name, description)
+        if rule:
+            logger.info("Using learned keyword rule")
+            return rule
+    except Exception as e:
+        logger.warning("Learned rules lookup failed, falling back to CSV: %s", e)
+
+    return None
+
+
 def build_journal_entry(
     receipt_id: str,
     vendor_name: str | None,
@@ -35,8 +58,11 @@ def build_journal_entry(
     tax_amount: int | None,
     description: str | None,
 ) -> JournalEntry:
-    rules = _load_rules()
-    rule = _match_rule(vendor_name, description, rules)
+    # Priority: learned rules → static CSV rules
+    rule = _match_with_learned_rules(vendor_name, description)
+    if rule is None:
+        rules = _load_rules()
+        rule = _match_rule(vendor_name, description, rules)
 
     amount = total_amount or 0
     tax = tax_amount or 0

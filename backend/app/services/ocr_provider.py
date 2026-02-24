@@ -19,10 +19,10 @@ class TesseractOCRProvider:
             import pytesseract
             from PIL import Image
 
+            from app.services.image_preprocessor import preprocess_for_ocr
+
             image = Image.open(image_path)
-            # Convert to RGB if necessary (handles RGBA, palette mode, etc.)
-            if image.mode not in ("L", "RGB"):
-                image = image.convert("RGB")
+            image = preprocess_for_ocr(image)
             text = pytesseract.image_to_string(image, lang=self.lang)
             return text.strip()
         except Exception as e:

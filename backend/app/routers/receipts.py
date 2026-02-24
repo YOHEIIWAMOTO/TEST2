@@ -15,6 +15,7 @@ from app.services.storage import storage
 from app.services.ocr_provider import ocr_provider
 from app.services.extract_provider import extract_provider
 from app.services.journal_builder import build_journal_entry
+from app.services.learned_rules import learn_from_approval
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +230,27 @@ def approve_receipt(receipt_id: str, db: Session = Depends(get_db)):
     receipt.status = ReceiptStatus.approved
     db.commit()
     db.refresh(receipt)
+
+    # Learn from the approved mapping for future auto-classification
+    _learn_from_receipt(receipt)
+
     return receipt
+
+
+def _learn_from_receipt(receipt: Receipt) -> None:
+    """Record vendor→account mapping from an approved receipt."""
+    try:
+        if receipt.journal_entries:
+            je = receipt.journal_entries[0]
+            learn_from_approval(
+                vendor_name=receipt.vendor_name,
+                description=receipt.description,
+                debit_account=je.debit_account,
+                credit_account=je.credit_account,
+                debit_tax_class=je.debit_tax_class,
+            )
+    except Exception as e:
+        logger.warning("Failed to learn from receipt %s: %s", receipt.id, e)
 
 
 @router.post("/{receipt_id}/reject", response_model=ReceiptDetail)
@@ -276,4 +297,11 @@ def approve_bulk(body: BulkApproveRequest, db: Session = Depends(get_db)):
         approved.append(rid)
 
     db.commit()
+
+    # Learn from all approved receipts
+    for rid in approved:
+        receipt = db.query(Receipt).filter(Receipt.id == rid).first()
+        if receipt:
+            _learn_from_receipt(receipt)
+
     return BulkApproveResponse(approved=approved, errors=errors)
