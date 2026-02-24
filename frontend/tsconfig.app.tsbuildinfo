@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/api/client.ts","./src/components/FileUpload.tsx","./src/components/ImageViewer.tsx","./src/components/JournalForm.tsx","./src/components/ReceiptCard.tsx","./src/pages/Exports.tsx","./src/pages/ReceiptDetail.tsx","./src/pages/ReceiptList.tsx","./src/pages/ReviewQueue.tsx"],"version":"5.9.3"}
