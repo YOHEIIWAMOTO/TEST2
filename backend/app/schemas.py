@@ -83,3 +83,12 @@ class BulkApproveRequest(BaseModel):
 class BulkApproveResponse(BaseModel):
     approved: list[str]
     errors: list[str]
+
+
+class BulkDeleteRequest(BaseModel):
+    receipt_ids: list[str]
+
+
+class BulkDeleteResponse(BaseModel):
+    deleted: list[str]
+    errors: list[str]

@@ -3,10 +3,13 @@ from PIL import Image
 from app.services.image_preprocessor import (
     preprocess_for_ocr,
     _fix_orientation,
+    _upscale_if_small,
     _to_grayscale,
+    _denoise,
     _enhance_contrast,
     _sharpen,
     _binarize,
+    _MIN_HEIGHT,
 )
 
 
@@ -36,10 +39,16 @@ class TestPreprocessForOcr:
         result = preprocess_for_ocr(img)
         assert isinstance(result, Image.Image)
 
-    def test_preserves_size(self):
+    def test_small_image_gets_upscaled(self):
         img = _make_test_image("RGB", (200, 300))
         result = preprocess_for_ocr(img)
-        assert result.size == (200, 300)
+        # Should be upscaled because 300 < _MIN_HEIGHT
+        assert result.size[1] >= _MIN_HEIGHT
+
+    def test_large_image_keeps_size(self):
+        img = _make_test_image("RGB", (2000, 3000))
+        result = preprocess_for_ocr(img)
+        assert result.size == (2000, 3000)
 
 
 class TestFixOrientation:
@@ -54,6 +63,25 @@ class TestFixOrientation:
         assert result.mode == "L"
 
 
+class TestUpscaleIfSmall:
+    def test_small_image_upscaled(self):
+        img = _make_test_image("RGB", (200, 400))
+        result = _upscale_if_small(img)
+        assert result.size[1] >= _MIN_HEIGHT
+
+    def test_large_image_unchanged(self):
+        img = _make_test_image("RGB", (2000, 2000))
+        result = _upscale_if_small(img)
+        assert result.size == (2000, 2000)
+
+    def test_aspect_ratio_preserved(self):
+        img = _make_test_image("RGB", (300, 600))
+        result = _upscale_if_small(img)
+        original_ratio = 300 / 600
+        new_ratio = result.size[0] / result.size[1]
+        assert abs(original_ratio - new_ratio) < 0.01
+
+
 class TestToGrayscale:
     def test_rgb_to_grayscale(self):
         img = _make_test_image("RGB")
@@ -64,6 +92,18 @@ class TestToGrayscale:
         img = _make_test_image("L")
         result = _to_grayscale(img)
         assert result.mode == "L"
+
+
+class TestDenoise:
+    def test_returns_same_mode(self):
+        img = _make_test_image("L")
+        result = _denoise(img)
+        assert result.mode == "L"
+
+    def test_returns_same_size(self):
+        img = _make_test_image("L", (150, 200))
+        result = _denoise(img)
+        assert result.size == (150, 200)
 
 
 class TestEnhanceContrast:

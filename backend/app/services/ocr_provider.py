@@ -11,6 +11,11 @@ class OCRProvider(Protocol):
 class TesseractOCRProvider:
     """OCR provider using Tesseract via pytesseract."""
 
+    # --oem 3 : LSTM neural-net engine (best accuracy)
+    # --psm 6 : assume a single uniform block of text (good for receipts)
+    # --dpi 300: hint the expected resolution after preprocessing
+    TESSERACT_CONFIG = "--oem 3 --psm 6 --dpi 300"
+
     def __init__(self, lang: str = "jpn"):
         self.lang = lang
 
@@ -23,7 +28,9 @@ class TesseractOCRProvider:
 
             image = Image.open(image_path)
             image = preprocess_for_ocr(image)
-            text = pytesseract.image_to_string(image, lang=self.lang)
+            text = pytesseract.image_to_string(
+                image, lang=self.lang, config=self.TESSERACT_CONFIG,
+            )
             return text.strip()
         except Exception as e:
             logger.error("Tesseract OCR failed for %s: %s", image_path, e)

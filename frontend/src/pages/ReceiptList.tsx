@@ -1,7 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router'
 import FileUpload from '../components/FileUpload'
-import { listReceipts, uploadReceipts, getReceiptImageUrl, ReceiptSummary } from '../api/client'
+import {
+  listReceipts, uploadReceipts, getReceiptImageUrl,
+  bulkApprove, bulkDelete,
+  ReceiptSummary,
+} from '../api/client'
 
 const STATUS_FILTERS = ['uploaded', 'ocr_done', 'extracted', 'needs_review', 'approved', 'rejected']
 const STATUS_COLORS: Record<string, string> = {
@@ -17,12 +21,16 @@ export default function ReceiptList() {
   const [receipts, setReceipts] = useState<ReceiptSummary[]>([])
   const [filter, setFilter] = useState<string>('')
   const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [acting, setActing] = useState(false)
+  const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
       const data = await listReceipts(filter || undefined)
       setReceipts(data)
+      setSelected(new Set())
     } finally {
       setLoading(false)
     }
@@ -35,11 +43,76 @@ export default function ReceiptList() {
     await load()
   }
 
+  // -- Selection helpers --
+  const allSelected = receipts.length > 0 && selected.size === receipts.length
+  const someSelected = selected.size > 0
+
+  const toggleAll = () => {
+    if (allSelected) {
+      setSelected(new Set())
+    } else {
+      setSelected(new Set(receipts.map(r => r.id)))
+    }
+  }
+
+  const toggleOne = (id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const showMsg = (text: string, type: 'success' | 'error') => {
+    setMessage({ text, type })
+    setTimeout(() => setMessage(null), 4000)
+  }
+
+  // -- Bulk actions --
+  const handleBulkApprove = async () => {
+    if (!someSelected) return
+    setActing(true)
+    try {
+      const result = await bulkApprove([...selected])
+      if (result.errors.length > 0) {
+        showMsg(`Approved ${result.approved.length}, errors: ${result.errors.length}`, 'error')
+      } else {
+        showMsg(`${result.approved.length} receipts approved`, 'success')
+      }
+      await load()
+    } catch (e: unknown) {
+      showMsg(e instanceof Error ? e.message : 'Approve failed', 'error')
+    } finally {
+      setActing(false)
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    if (!someSelected) return
+    if (!window.confirm(`Delete ${selected.size} receipt(s)?`)) return
+    setActing(true)
+    try {
+      const result = await bulkDelete([...selected])
+      if (result.errors.length > 0) {
+        showMsg(`Deleted ${result.deleted.length}, errors: ${result.errors.length}`, 'error')
+      } else {
+        showMsg(`${result.deleted.length} receipts deleted`, 'success')
+      }
+      await load()
+    } catch (e: unknown) {
+      showMsg(e instanceof Error ? e.message : 'Delete failed', 'error')
+    } finally {
+      setActing(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <h2 className="text-2xl font-bold text-gray-900">Receipts</h2>
       <FileUpload onUpload={handleUpload} />
 
+      {/* Status filters */}
       <div className="flex gap-2 flex-wrap">
         <button
           onClick={() => setFilter('')}
@@ -58,6 +131,38 @@ export default function ReceiptList() {
         ))}
       </div>
 
+      {/* Notification */}
+      {message && (
+        <div className={`rounded-lg p-3 text-sm ${
+          message.type === 'success'
+            ? 'bg-green-50 border border-green-200 text-green-700'
+            : 'bg-red-50 border border-red-200 text-red-700'
+        }`}>
+          {message.text}
+        </div>
+      )}
+
+      {/* Bulk action bar */}
+      {someSelected && (
+        <div className="flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-lg p-3">
+          <span className="text-sm text-blue-800 font-medium">{selected.size} selected</span>
+          <button
+            onClick={handleBulkApprove}
+            disabled={acting}
+            className="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-700 disabled:opacity-50"
+          >Approve</button>
+          <button
+            onClick={handleBulkDelete}
+            disabled={acting}
+            className="px-3 py-1.5 bg-red-600 text-white rounded text-sm hover:bg-red-700 disabled:opacity-50"
+          >Delete</button>
+          <button
+            onClick={() => setSelected(new Set())}
+            className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded text-sm hover:bg-gray-300 ml-auto"
+          >Clear</button>
+        </div>
+      )}
+
       {loading ? (
         <p className="text-gray-500">Loading...</p>
       ) : receipts.length === 0 ? (
@@ -67,6 +172,14 @@ export default function ReceiptList() {
           <table className="w-full bg-white rounded-lg shadow">
             <thead className="bg-gray-50 border-b">
               <tr>
+                <th className="px-4 py-3 text-center w-10">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleAll}
+                    className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                  />
+                </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Image</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">File</th>
@@ -78,7 +191,20 @@ export default function ReceiptList() {
             </thead>
             <tbody className="divide-y divide-gray-200">
               {receipts.map(r => (
-                <tr key={r.id} className="hover:bg-gray-50 transition-colors">
+                <tr
+                  key={r.id}
+                  className={`transition-colors ${
+                    selected.has(r.id) ? 'bg-blue-50' : 'hover:bg-gray-50'
+                  }`}
+                >
+                  <td className="px-4 py-3 text-center">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(r.id)}
+                      onChange={() => toggleOne(r.id)}
+                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                    />
+                  </td>
                   <td className="px-4 py-3">
                     <Link to={`/receipts/${r.id}`}>
                       <img

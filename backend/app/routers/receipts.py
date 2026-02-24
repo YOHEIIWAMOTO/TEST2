@@ -10,6 +10,7 @@ from app.models import Receipt, JournalEntry, ReceiptStatus
 from app.schemas import (
     ReceiptSummary, ReceiptDetail, ReceiptUpdateWithJournal,
     BulkApproveRequest, BulkApproveResponse,
+    BulkDeleteRequest, BulkDeleteResponse,
 )
 from app.services.storage import storage
 from app.services.ocr_provider import ocr_provider
@@ -305,3 +306,37 @@ def approve_bulk(body: BulkApproveRequest, db: Session = Depends(get_db)):
             _learn_from_receipt(receipt)
 
     return BulkApproveResponse(approved=approved, errors=errors)
+
+
+@router.delete("/{receipt_id}")
+def delete_receipt(receipt_id: str, db: Session = Depends(get_db)):
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    if receipt.status == ReceiptStatus.approved:
+        raise HTTPException(status_code=400, detail="Cannot delete approved receipt")
+    db.delete(receipt)
+    db.commit()
+    return {"detail": "Deleted"}
+
+
+@router.post("/delete-bulk", response_model=BulkDeleteResponse)
+def delete_bulk(body: BulkDeleteRequest, db: Session = Depends(get_db)):
+    if not body.receipt_ids:
+        raise HTTPException(status_code=400, detail="No receipt IDs provided")
+
+    deleted = []
+    errors = []
+    for rid in body.receipt_ids:
+        receipt = db.query(Receipt).filter(Receipt.id == rid).first()
+        if not receipt:
+            errors.append(f"{rid}: not found")
+            continue
+        if receipt.status == ReceiptStatus.approved:
+            errors.append(f"{rid}: cannot delete approved receipt")
+            continue
+        db.delete(receipt)
+        deleted.append(rid)
+
+    db.commit()
+    return BulkDeleteResponse(deleted=deleted, errors=errors)

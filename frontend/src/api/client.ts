@@ -122,6 +122,18 @@ export async function bulkApprove(receiptIds: string[]): Promise<{ approved: str
   })
 }
 
+export async function deleteReceipt(id: string): Promise<void> {
+  await request(`/receipts/${id}`, { method: 'DELETE' })
+}
+
+export async function bulkDelete(receiptIds: string[]): Promise<{ deleted: string[]; errors: string[] }> {
+  return request('/receipts/delete-bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ receipt_ids: receiptIds }),
+  })
+}
+
 export async function runExport(): Promise<ExportRun> {
   return request<ExportRun>('/exports/run', { method: 'POST' })
 }
