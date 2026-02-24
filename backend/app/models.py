@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, date
 from sqlalchemy import (
-    String, Integer, Text, DateTime, Date, Enum, ForeignKey, Table, Column,
+    String, Integer, Text, DateTime, Date, Enum, ForeignKey, Index, Table, Column,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -26,6 +26,11 @@ export_run_receipts = Table(
 
 class Receipt(Base):
     __tablename__ = "receipts"
+    __table_args__ = (
+        Index("ix_receipts_status", "status"),
+        Index("ix_receipts_transaction_date", "transaction_date"),
+        Index("ix_receipts_uploaded_at", "uploaded_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(26), primary_key=True)
     status: Mapped[str] = mapped_column(
