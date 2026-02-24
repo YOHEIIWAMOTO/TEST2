@@ -2,10 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const CONFIG_DIR = path.join(__dirname, '..', 'config');
-const PLUGINS_DIR = path.join(__dirname, '..', 'plugins');
+const ROOT_DIR = path.join(__dirname, '..');
+const CONFIG_DIR = path.join(ROOT_DIR, 'config');
+const PLUGINS_DIR = path.join(ROOT_DIR, 'plugins');
+const SKILLS_DIR = path.join(ROOT_DIR, 'skills');
 const MARKETPLACES_FILE = path.join(CONFIG_DIR, 'marketplaces.json');
 const INSTALLED_FILE = path.join(CONFIG_DIR, 'installed.json');
+const SKILLS_FILE = path.join(CONFIG_DIR, 'skills.json');
 
 function ensureConfig() {
   if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
@@ -20,6 +23,138 @@ function loadJSON(filepath) {
 
 function saveJSON(filepath, data) {
   fs.writeFileSync(filepath, JSON.stringify(data, null, 2) + '\n');
+}
+
+/**
+ * Parse SKILL.md YAML front matter to extract skill metadata.
+ * YAML folded scalar (>) 形式に対応。
+ */
+function parseSkillFrontMatter(skillMdPath) {
+  const content = fs.readFileSync(skillMdPath, 'utf-8');
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return null;
+
+  const yaml = match[1];
+  const meta = {};
+
+  // name フィールド
+  const nameMatch = yaml.match(/^name:\s*(.+)$/m);
+  if (nameMatch) meta.name = nameMatch[1].trim();
+
+  // description フィールド — folded scalar (>) / literal (|) / インライン対応
+  const descHeaderMatch = yaml.match(/^description:\s*([>|]|-?)?\s*$/m);
+  if (descHeaderMatch) {
+    // 複数行: "description: >" or "description: |" の後にインデントされた行
+    const afterDesc = yaml.slice(yaml.indexOf(descHeaderMatch[0]) + descHeaderMatch[0].length);
+    const lines = afterDesc.split('\n');
+    const collected = [];
+    for (const line of lines) {
+      if (/^\s+\S/.test(line)) {
+        collected.push(line.trim());
+      } else if (collected.length > 0) {
+        break;
+      }
+    }
+    if (collected.length > 0) {
+      meta.description = collected.join(' ');
+    }
+  } else {
+    // インライン: "description: some text"
+    const descInline = yaml.match(/^description:\s*(.+)$/m);
+    if (descInline) meta.description = descInline[1].trim();
+  }
+
+  return meta.name ? meta : null;
+}
+
+/**
+ * Scan a plugin directory for skills (subdirectories with SKILL.md).
+ */
+function discoverSkills(pluginDir, pluginName, marketplace) {
+  const skillsRoot = path.join(pluginDir, 'skills');
+  if (!fs.existsSync(skillsRoot)) return [];
+
+  const entries = fs.readdirSync(skillsRoot, { withFileTypes: true });
+  const skills = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skillMd = path.join(skillsRoot, entry.name, 'SKILL.md');
+    if (!fs.existsSync(skillMd)) continue;
+
+    const meta = parseSkillFrontMatter(skillMd);
+    skills.push({
+      id: `${pluginName}:${entry.name}`,
+      dir: entry.name,
+      name: meta ? meta.name : entry.name,
+      description: meta ? meta.description : '',
+      plugin: pluginName,
+      marketplace,
+      sourcePath: path.join('plugins', pluginName, 'skills', entry.name)
+    });
+  }
+  return skills;
+}
+
+/**
+ * Create symlinks from project skills/ to plugin skill directories.
+ * Namespace: skills/<plugin>:<skill-dir> -> plugins/<plugin>/skills/<skill-dir>
+ */
+function linkSkills(skills) {
+  if (!fs.existsSync(SKILLS_DIR)) fs.mkdirSync(SKILLS_DIR, { recursive: true });
+
+  for (const skill of skills) {
+    const linkPath = path.join(SKILLS_DIR, skill.id);
+    const targetPath = path.join(ROOT_DIR, skill.sourcePath);
+
+    // 既存のリンクを削除してから再作成
+    if (fs.existsSync(linkPath)) fs.rmSync(linkPath, { recursive: true });
+
+    fs.symlinkSync(targetPath, linkPath);
+  }
+}
+
+/**
+ * Remove symlinks for a plugin's skills.
+ */
+function unlinkSkills(pluginName) {
+  if (!fs.existsSync(SKILLS_DIR)) return;
+
+  const prefix = `${pluginName}:`;
+  const entries = fs.readdirSync(SKILLS_DIR);
+  for (const entry of entries) {
+    if (entry.startsWith(prefix)) {
+      fs.rmSync(path.join(SKILLS_DIR, entry), { recursive: true });
+    }
+  }
+}
+
+/**
+ * Rebuild config/skills.json and symlinks from all installed plugins.
+ */
+function rebuildSkillsRegistry() {
+  ensureConfig();
+  const installed = loadJSON(INSTALLED_FILE);
+  const allSkills = {};
+
+  // 既存の skills/ ディレクトリをクリーンアップ
+  if (fs.existsSync(SKILLS_DIR)) {
+    fs.rmSync(SKILLS_DIR, { recursive: true });
+  }
+
+  for (const [, info] of Object.entries(installed)) {
+    const pluginDir = path.join(PLUGINS_DIR, info.name);
+    if (!fs.existsSync(pluginDir)) continue;
+
+    const skills = discoverSkills(pluginDir, info.name, info.marketplace);
+    linkSkills(skills);
+    for (const skill of skills) {
+      allSkills[skill.id] = skill;
+    }
+  }
+
+  saveJSON(SKILLS_FILE, allSkills);
+  return allSkills;
 }
 
 /**
@@ -155,6 +290,19 @@ function installPlugin(specifier) {
 
   saveJSON(INSTALLED_FILE, installed);
   console.log(`Plugin installed: ${pluginKey}`);
+
+  // スキル統合: 検出 → シンボリックリンク → レジストリ更新
+  const skills = discoverSkills(pluginDir, pluginName, marketplace);
+  if (skills.length > 0) {
+    linkSkills(skills);
+    const allSkills = rebuildSkillsRegistry();
+    console.log(`  Integrated ${skills.length} skill(s):`);
+    for (const s of skills) {
+      console.log(`    - ${s.id} (${s.name})`);
+    }
+    console.log(`  Skills registry: config/skills.json (${Object.keys(allSkills).length} total)`);
+    console.log(`  Symlinks created in: skills/`);
+  }
 }
 
 /**
@@ -172,13 +320,17 @@ function uninstallPlugin(specifier) {
   const pluginInfo = installed[specifier];
   const pluginDir = path.join(PLUGINS_DIR, pluginInfo.name);
 
+  // スキルのシンボリックリンク削除 → プラグイン削除 → レジストリ更新
+  unlinkSkills(pluginInfo.name);
+
   if (fs.existsSync(pluginDir)) {
     fs.rmSync(pluginDir, { recursive: true });
   }
 
   delete installed[specifier];
   saveJSON(INSTALLED_FILE, installed);
-  console.log(`Plugin uninstalled: ${specifier}`);
+  rebuildSkillsRegistry();
+  console.log(`Plugin uninstalled: ${specifier} (skills removed)`);
 }
 
 /**
@@ -200,11 +352,37 @@ function listPlugins() {
   }
 }
 
+/**
+ * List all integrated skills.
+ */
+function listSkills() {
+  ensureConfig();
+  if (!fs.existsSync(SKILLS_FILE)) {
+    console.log('No skills registered.');
+    return;
+  }
+  const skills = loadJSON(SKILLS_FILE);
+  const entries = Object.entries(skills);
+
+  if (entries.length === 0) {
+    console.log('No skills registered.');
+    return;
+  }
+
+  console.log(`Integrated skills (${entries.length}):`);
+  for (const [id, info] of entries) {
+    const desc = info.description ? ` - ${info.description.slice(0, 80)}` : '';
+    console.log(`  ${id}${desc}`);
+  }
+}
+
 module.exports = {
   addMarketplace,
   removeMarketplace,
   listMarketplaces,
   installPlugin,
   uninstallPlugin,
-  listPlugins
+  listPlugins,
+  listSkills,
+  rebuildSkillsRegistry
 };

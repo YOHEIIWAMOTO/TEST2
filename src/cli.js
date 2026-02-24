@@ -6,7 +6,9 @@ const {
   listMarketplaces,
   installPlugin,
   uninstallPlugin,
-  listPlugins
+  listPlugins,
+  listSkills,
+  rebuildSkillsRegistry
 } = require('./plugin-manager');
 
 const args = process.argv.slice(2);
@@ -16,9 +18,11 @@ function printUsage() {
   plugin marketplace add <owner/repo>    Add a marketplace source
   plugin marketplace remove <name>       Remove a marketplace source
   plugin marketplace list                List registered marketplaces
-  plugin install <marketplace@plugin>    Install a plugin
-  plugin uninstall <marketplace@plugin>  Uninstall a plugin
+  plugin install <marketplace@plugin>    Install a plugin (with skill integration)
+  plugin uninstall <marketplace@plugin>  Uninstall a plugin (removes skills)
   plugin list                            List installed plugins
+  plugin skills                          List all integrated skills
+  plugin skills rebuild                  Rebuild skills registry from installed plugins
   plugin help                            Show this help message`);
 }
 
@@ -76,6 +80,17 @@ function run() {
 
       case 'list': {
         listPlugins();
+        break;
+      }
+
+      case 'skills': {
+        const subcommand = args[1];
+        if (subcommand === 'rebuild') {
+          const allSkills = rebuildSkillsRegistry();
+          console.log(`Skills registry rebuilt: ${Object.keys(allSkills).length} skill(s)`);
+        } else {
+          listSkills();
+        }
         break;
       }
 
