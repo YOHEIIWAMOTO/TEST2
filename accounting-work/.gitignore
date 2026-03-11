@@ -1,0 +1,16 @@
+# 個人情報を含む可能性のあるCSVファイル
+bank-statements/*.csv
+
+# 大きなPDFファイル（レシート・請求書）
+receipts/*.pdf
+
+# 一時ファイル
+*.tmp
+*.temp
+*~
+.DS_Store
+Thumbs.db
+~$*
+
+# templates/ 配下のサンプルCSVは追跡対象にする
+!templates/*.csv
